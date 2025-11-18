@@ -1,0 +1,102 @@
+# Inbound Gateway Configuration
+port: "8080"
+project_id: "your-gcp-project"
+max_request_size: 10485760 # 10MB
+request_timeout: "30s"
+shutdown_timeout: "30s"
+enable_metrics: true
+enable_tracing: true
+
+# Rate Limiting Configuration
+rate_limit:
+  enabled: true
+  requests_per_second: 100.0
+  burst: 200
+  per_client: true
+  per_integration: true
+  client_identifier: "header" # header, ip, or token
+  
+  # Redis configuration for distributed rate limiting (optional)
+  # redis_config:
+  #   addresses:
+  #     - "localhost:6379"
+  #   password: ""
+  #   db: 0
+  #   max_retries: 3
+  #   pool_size: 10
+  #   tls: false
+  #   timeout: "5s"
+  
+  strategies:
+    - name: "default"
+      type: "token_bucket"
+      priority: 1
+      config:
+        tokens_per_second: 100
+        bucket_size: 200
+
+# Circuit Breaker Configuration
+circuit_breaker:
+  enabled: true
+  failure_threshold: 0.5
+  success_threshold: 0.8
+  timeout: "60s"
+  half_open_max_requests: 3
+  observation_window: "60s"
+
+# PubSub Configuration
+pubsub:
+  project_id: "your-gcp-project"
+  topic_prefix: "integrations"
+  enable_message_ordering: false
+  enable_retries: true
+  publish_timeout: "10s"
+  batching_enabled: true
+  
+  retry_config:
+    max_retries: 3
+    initial_delay: "1s"
+    max_delay: "10s"
+    multiplier: 2.0
+    randomization_factor: 0.1
+  
+  batching_config:
+    max_messages: 100
+    max_bytes: 1000000
+    max_latency: "100ms"
+
+# Authentication Configuration
+auth:
+  jwt_config:
+    secret: "your-jwt-secret-key-change-this"
+    issuer: "inbound-gateway"
+    audience:
+      - "api.yourcompany.com"
+    expires_in: 3600 # 1 hour
+  
+  api_key_config:
+    header_name: "X-API-Key"
+    # Keys would typically be loaded from a secure store
+    # This is for demonstration only
+    keys:
+      "demo-api-key-123":
+        client_id: "demo-client"
+        scopes: ["read", "write"]
+        roles: ["user"]
+        enabled: true
+  
+  # oauth2_config:
+  #   client_id: "your-oauth-client-id"
+  #   client_secret: "your-oauth-client-secret"
+  #   auth_url: "https://accounts.google.com/o/oauth2/auth"
+  #   token_url: "https://oauth2.googleapis.com/token"
+  #   redirect_url: "http://localhost:8080/callback"
+  #   scopes: ["openid", "email", "profile"]
+  
+  # mtls_config:
+  #   enabled: false
+  #   client_ca_file: "/path/to/ca.crt"
+  #   allowed_cns:
+  #     - "client.example.com"
+  #   allowed_dns_names:
+  #     - "*.example.com"
