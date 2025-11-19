@@ -46,9 +46,6 @@ func TestInboundGateway_HandleIntegration(t *testing.T) {
 		},
 	}
 
-	// Create logger
-	logger, _ := zap.NewDevelopment()
-
 	// Create gateway
 	gw, err := gateway.NewInboundGateway(config)
 	if err != nil {

@@ -8,13 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"cloud.google.com/go/pubsub"
-	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 // Metrics for monitoring
@@ -332,7 +329,7 @@ func (g *InboundGateway) initializeComponents() error {
 	}
 
 	// Initialize authenticator
-	g.authenticator, err = NewAuthenticator(g.config.AuthConfig, g.logger)
+	g.authenticator, err = NewAuthenticator(&g.config.AuthConfig, g.logger)
 	if err != nil {
 		return fmt.Errorf("failed to initialize authenticator: %w", err)
 	}
@@ -345,7 +342,7 @@ func (g *InboundGateway) Start(ctx context.Context) error {
 	g.logger.Info("Starting Inbound Gateway", zap.String("port", g.config.Port))
 
 	// Setup HTTP server
-	router := g.setupRoutes()
+	router := g.SetupRoutes()
 	
 	g.server = &http.Server{
 		Addr:         ":" + g.config.Port,

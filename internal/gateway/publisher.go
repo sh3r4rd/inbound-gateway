@@ -11,7 +11,6 @@ import (
 	"cloud.google.com/go/pubsub"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
-	"google.golang.org/api/option"
 )
 
 // PubSubPublisher handles publishing messages to Google Cloud Pub/Sub

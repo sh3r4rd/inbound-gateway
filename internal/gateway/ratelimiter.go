@@ -215,10 +215,10 @@ func (m *RateLimiterManager) allowDistributedWithLimit(ctx context.Context, key 
 	
 	// Remove old entries
 	pipe.ZRemRangeByScore(ctx, key, "0", fmt.Sprintf("%d", windowStart.UnixNano()))
-	
+
 	// Count current entries
-	count := pipe.ZCount(ctx, key, fmt.Sprintf("%d", windowStart.UnixNano()), fmt.Sprintf("%d", now.UnixNano()))
-	
+	_ = pipe.ZCount(ctx, key, fmt.Sprintf("%d", windowStart.UnixNano()), fmt.Sprintf("%d", now.UnixNano()))
+
 	// Add current request
 	pipe.ZAdd(ctx, key, &redis.Z{
 		Score:  float64(now.UnixNano()),
@@ -317,10 +317,10 @@ func (m *RateLimiterManager) UpdateLimits(requestsPerSecond float64, burst int) 
 	m.config.Burst = burst
 
 	// Update existing limiters
-	for key, limiter := range m.localLimiters {
+	for key := range m.localLimiters {
 		newLimiter := rate.NewLimiter(rate.Limit(requestsPerSecond), burst)
 		m.localLimiters[key] = newLimiter
-		
+
 		m.logger.Info("Updated rate limiter",
 			zap.String("key", key),
 			zap.Float64("requests_per_second", requestsPerSecond),

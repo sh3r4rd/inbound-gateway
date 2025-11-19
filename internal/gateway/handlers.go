@@ -16,8 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// setupRoutes configures all HTTP routes and middleware
-func (g *InboundGateway) setupRoutes() *mux.Router {
+// SetupRoutes configures all HTTP routes and middleware
+func (g *InboundGateway) SetupRoutes() *mux.Router {
 	router := mux.NewRouter()
 
 	// Apply global middleware
@@ -671,4 +671,363 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 		rw.WriteHeader(http.StatusOK)
 	}
 	return rw.ResponseWriter.Write(b)
+}
+
+// handleHealth returns the health status of the gateway
+func (g *InboundGateway) handleHealth(w http.ResponseWriter, r *http.Request) {
+	health := map[string]interface{}{
+		"status":    "healthy",
+		"timestamp": time.Now().UTC(),
+		"service":   "inbound-gateway",
+		"version":   "1.0.0",
+	}
+
+	g.respondWithJSON(w, http.StatusOK, health)
+}
+
+// handleReady returns the readiness status for Kubernetes probes
+func (g *InboundGateway) handleReady(w http.ResponseWriter, r *http.Request) {
+	// Check if all critical components are ready
+	isReady := true
+	checks := make(map[string]bool)
+
+	// Check publisher health
+	if g.publisher != nil {
+		checks["publisher"] = g.publisher.IsHealthy()
+		isReady = isReady && checks["publisher"]
+	} else {
+		checks["publisher"] = false
+		isReady = false
+	}
+
+	// Check if authenticator is initialized
+	checks["authenticator"] = g.authenticator != nil
+	isReady = isReady && checks["authenticator"]
+
+	// Check if validator is initialized
+	checks["validator"] = g.validator != nil
+	isReady = isReady && checks["validator"]
+
+	// Check if router is initialized
+	checks["router"] = g.router != nil
+	isReady = isReady && checks["router"]
+
+	status := map[string]interface{}{
+		"ready":     isReady,
+		"timestamp": time.Now().UTC(),
+		"checks":    checks,
+	}
+
+	if isReady {
+		g.respondWithJSON(w, http.StatusOK, status)
+	} else {
+		g.respondWithJSON(w, http.StatusServiceUnavailable, status)
+	}
+}
+
+// graphqlHandler returns an HTTP handler for GraphQL requests
+func (g *InboundGateway) graphqlHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse GraphQL request
+		var graphqlReq struct {
+			Query         string                 `json:"query"`
+			OperationName string                 `json:"operationName,omitempty"`
+			Variables     map[string]interface{} `json:"variables,omitempty"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&graphqlReq); err != nil {
+			g.logger.Error("Failed to parse GraphQL request", zap.Error(err))
+			g.respondWithError(w, http.StatusBadRequest, "Invalid GraphQL request")
+			return
+		}
+
+		// Convert GraphQL request to standard Request format
+		body, _ := json.Marshal(graphqlReq)
+		req := &Request{
+			ID:              uuid.New().String(),
+			IntegrationType: "graphql",
+			Method:          r.Method,
+			Path:            r.URL.Path,
+			Headers:         r.Header,
+			Body:            json.RawMessage(body),
+			ClientID:        getClientID(r.Context()),
+			Timestamp:       time.Now(),
+			TraceID:         getTraceID(r.Context()),
+			SpanID:          getSpanID(r.Context()),
+			Metadata: map[string]interface{}{
+				"operation_name": graphqlReq.OperationName,
+				"has_variables":  len(graphqlReq.Variables) > 0,
+			},
+		}
+
+		// Get GraphQL integration config
+		integrationConfig, exists := g.config.IntegrationConfigs["graphql"]
+		if !exists || !integrationConfig.Enabled {
+			g.respondWithError(w, http.StatusNotFound, "GraphQL integration not enabled")
+			return
+		}
+
+		// Validate request
+		if err := g.validator.Validate(req, integrationConfig.ValidationRules); err != nil {
+			g.logger.Warn("GraphQL validation failed", zap.Error(err))
+			g.respondWithValidationError(w, err)
+			return
+		}
+
+		// Route to appropriate topic
+		topics, err := g.router.Route(req, integrationConfig.RoutingRules)
+		if err != nil {
+			g.logger.Error("GraphQL routing failed", zap.Error(err))
+			g.respondWithError(w, http.StatusInternalServerError, "Routing failed")
+			return
+		}
+
+		// Publish to Pub/Sub
+		messageIDs := make([]string, 0)
+		for _, topic := range topics {
+			messageID, err := g.publisher.Publish(r.Context(), topic, req)
+			if err != nil {
+				g.logger.Error("Failed to publish GraphQL message",
+					zap.Error(err),
+					zap.String("topic", topic),
+				)
+				continue
+			}
+			messageIDs = append(messageIDs, messageID)
+		}
+
+		if len(messageIDs) == 0 {
+			g.respondWithError(w, http.StatusInternalServerError, "Failed to process GraphQL request")
+			return
+		}
+
+		// Send response
+		response := Response{
+			ID:      req.ID,
+			Status:  "success",
+			Message: "GraphQL request processed successfully",
+			Data: map[string]interface{}{
+				"message_ids": messageIDs,
+				"topics":      topics,
+			},
+			Timestamp: time.Now(),
+			TraceID:   getTraceID(r.Context()),
+		}
+
+		g.respondWithJSON(w, http.StatusAccepted, response)
+	})
+}
+
+// handleBatchUpload handles batch file uploads
+func (g *InboundGateway) handleBatchUpload(w http.ResponseWriter, r *http.Request) {
+	// Parse multipart form
+	if err := r.ParseMultipartForm(g.config.MaxRequestSize); err != nil {
+		g.logger.Error("Failed to parse multipart form", zap.Error(err))
+		g.respondWithError(w, http.StatusBadRequest, "Invalid multipart form")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		g.logger.Error("Failed to get file from form", zap.Error(err))
+		g.respondWithError(w, http.StatusBadRequest, "File not found in request")
+		return
+	}
+	defer file.Close()
+
+	// Read file content
+	content, err := io.ReadAll(io.LimitReader(file, g.config.MaxRequestSize))
+	if err != nil {
+		g.logger.Error("Failed to read file content", zap.Error(err))
+		g.respondWithError(w, http.StatusBadRequest, "Failed to read file")
+		return
+	}
+
+	// Create batch request
+	batchID := uuid.New().String()
+	req := &Request{
+		ID:              batchID,
+		IntegrationType: "batch",
+		Method:          r.Method,
+		Path:            r.URL.Path,
+		Headers:         r.Header,
+		Body:            json.RawMessage(content),
+		ClientID:        getClientID(r.Context()),
+		Timestamp:       time.Now(),
+		TraceID:         getTraceID(r.Context()),
+		SpanID:          getSpanID(r.Context()),
+		Metadata: map[string]interface{}{
+			"batch_id":    batchID,
+			"filename":    header.Filename,
+			"size":        len(content),
+			"content_type": header.Header.Get("Content-Type"),
+		},
+	}
+
+	// Publish to batch topic
+	topic := "integrations.batch"
+	messageID, err := g.publisher.Publish(r.Context(), topic, req)
+	if err != nil {
+		g.logger.Error("Failed to publish batch upload",
+			zap.Error(err),
+			zap.String("batch_id", batchID),
+		)
+		g.respondWithError(w, http.StatusInternalServerError, "Failed to process batch upload")
+		return
+	}
+
+	// Send response
+	response := Response{
+		ID:      batchID,
+		Status:  "accepted",
+		Message: "Batch upload accepted for processing",
+		Data: map[string]interface{}{
+			"batch_id":   batchID,
+			"message_id": messageID,
+			"filename":   header.Filename,
+			"size":       len(content),
+		},
+		Timestamp: time.Now(),
+		TraceID:   getTraceID(r.Context()),
+	}
+
+	g.respondWithJSON(w, http.StatusAccepted, response)
+}
+
+// handleBatchStatus returns the status of a batch job
+func (g *InboundGateway) handleBatchStatus(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	batchID := vars["batchId"]
+
+	if batchID == "" {
+		g.respondWithError(w, http.StatusBadRequest, "Batch ID is required")
+		return
+	}
+
+	// In a real implementation, this would query a database or cache
+	// For now, return a placeholder response
+	status := map[string]interface{}{
+		"batch_id":   batchID,
+		"status":     "processing",
+		"created_at": time.Now().Add(-5 * time.Minute).UTC(),
+		"updated_at": time.Now().UTC(),
+		"progress": map[string]interface{}{
+			"total":      100,
+			"processed":  45,
+			"failed":     2,
+			"successful": 43,
+		},
+		"message": "Batch is being processed",
+	}
+
+	g.respondWithJSON(w, http.StatusOK, status)
+}
+
+// handleConfigReload reloads the gateway configuration
+func (g *InboundGateway) handleConfigReload(w http.ResponseWriter, r *http.Request) {
+	g.logger.Info("Configuration reload requested",
+		zap.String("requested_by", getClientID(r.Context())),
+		zap.String("trace_id", getTraceID(r.Context())),
+	)
+
+	// Trigger config reload
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// In a real implementation, this would reload from the config source
+	// For now, trigger the background config reloader
+	go g.reloadConfig()
+
+	response := Response{
+		ID:        uuid.New().String(),
+		Status:    "success",
+		Message:   "Configuration reload initiated",
+		Timestamp: time.Now(),
+		TraceID:   getTraceID(r.Context()),
+	}
+
+	g.respondWithJSON(w, http.StatusOK, response)
+}
+
+// handleCircuitBreakerReset resets the circuit breaker for a specific integration
+func (g *InboundGateway) handleCircuitBreakerReset(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	integrationType := vars["integrationType"]
+
+	if integrationType == "" {
+		g.respondWithError(w, http.StatusBadRequest, "Integration type is required")
+		return
+	}
+
+	g.logger.Info("Circuit breaker reset requested",
+		zap.String("integration", integrationType),
+		zap.String("requested_by", getClientID(r.Context())),
+		zap.String("trace_id", getTraceID(r.Context())),
+	)
+
+	// Reset circuit breaker
+	if err := g.circuitBreaker.Reset(integrationType); err != nil {
+		g.logger.Error("Failed to reset circuit breaker",
+			zap.Error(err),
+			zap.String("integration", integrationType),
+		)
+		g.respondWithError(w, http.StatusInternalServerError, "Failed to reset circuit breaker")
+		return
+	}
+
+	response := Response{
+		ID:      uuid.New().String(),
+		Status:  "success",
+		Message: fmt.Sprintf("Circuit breaker reset for integration: %s", integrationType),
+		Data: map[string]interface{}{
+			"integration": integrationType,
+			"state":       "closed",
+		},
+		Timestamp: time.Now(),
+		TraceID:   getTraceID(r.Context()),
+	}
+
+	g.respondWithJSON(w, http.StatusOK, response)
+}
+
+// handleRateLimitUpdate updates rate limits dynamically
+func (g *InboundGateway) handleRateLimitUpdate(w http.ResponseWriter, r *http.Request) {
+	var updateReq struct {
+		RequestsPerSecond float64 `json:"requests_per_second"`
+		Burst             int     `json:"burst"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&updateReq); err != nil {
+		g.logger.Error("Failed to parse rate limit update request", zap.Error(err))
+		g.respondWithError(w, http.StatusBadRequest, "Invalid request format")
+		return
+	}
+
+	if updateReq.RequestsPerSecond <= 0 {
+		g.respondWithError(w, http.StatusBadRequest, "Requests per second must be positive")
+		return
+	}
+
+	g.logger.Info("Rate limit update requested",
+		zap.Float64("requests_per_second", updateReq.RequestsPerSecond),
+		zap.Int("burst", updateReq.Burst),
+		zap.String("requested_by", getClientID(r.Context())),
+	)
+
+	// Update rate limiter (applies globally to all integrations)
+	g.rateLimiter.UpdateLimits(updateReq.RequestsPerSecond, updateReq.Burst)
+
+	response := Response{
+		ID:      uuid.New().String(),
+		Status:  "success",
+		Message: "Rate limits updated successfully for all integrations",
+		Data: map[string]interface{}{
+			"requests_per_second": updateReq.RequestsPerSecond,
+			"burst":               updateReq.Burst,
+		},
+		Timestamp: time.Now(),
+		TraceID:   getTraceID(r.Context()),
+	}
+
+	g.respondWithJSON(w, http.StatusOK, response)
 }

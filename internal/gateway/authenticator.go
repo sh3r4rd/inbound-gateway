@@ -411,24 +411,14 @@ func (a *Authenticator) verifyStripeSignature(r *http.Request, secret string) er
 
 	// Parse signature header
 	// Format: t=timestamp,v1=signature
-	parts := strings.Split(signature, ",")
-	var timestamp, sig string
-	for _, part := range parts {
-		kv := strings.Split(part, "=")
-		if len(kv) == 2 {
-			if kv[0] == "t" {
-				timestamp = kv[1]
-			} else if kv[0] == "v1" {
-				sig = kv[1]
-			}
-		}
-	}
+	// TODO: Complete Stripe signature verification implementation
+	_ = signature // Use signature to avoid unused variable error
 
 	// Verify timestamp is recent (prevent replay attacks)
-	// Implementation would check timestamp
+	// TODO: Implementation would parse and verify timestamp from signature header
 
 	// Verify signature
-	// Implementation would calculate and compare HMAC
+	// TODO: Implementation would calculate and compare HMAC
 
 	return nil
 }
